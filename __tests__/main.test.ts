@@ -7,51 +7,305 @@
  */
 import { jest } from '@jest/globals'
 import * as core from '../__fixtures__/core.js'
-import { wait } from '../__fixtures__/wait.js'
+import * as github from '../__fixtures__/github.js'
 
-// Mocks should be declared before the module being tested is imported.
 jest.unstable_mockModule('@actions/core', () => core)
-jest.unstable_mockModule('../src/wait.js', () => ({ wait }))
+jest.unstable_mockModule('@actions/github', () => github)
 
-// The module being tested should be imported dynamically. This ensures that the
-// mocks are used in place of any actual dependencies.
 const { run } = await import('../src/main.js')
 
-describe('main.ts', () => {
+describe('Merge Conflict Detection Action', () => {
   beforeEach(() => {
-    // Set the action's inputs as return values from core.getInput().
-    core.getInput.mockImplementation(() => '500')
-
-    // Mock the wait function so that it does not actually wait.
-    wait.mockImplementation(() => Promise.resolve('done!'))
+    jest.clearAllMocks()
   })
 
-  afterEach(() => {
-    jest.resetAllMocks()
-  })
+  describe('run', () => {
+    it('should fail when not triggered by a pull request', async () => {
+      github.context.payload = {}
+      core.getInput.mockReturnValue('fake-token')
+      core.getBooleanInput.mockReturnValue(false)
 
-  it('Sets the time output', async () => {
-    await run()
+      await run()
 
-    // Verify the time output was set.
-    expect(core.setOutput).toHaveBeenNthCalledWith(
-      1,
-      'time',
-      // Simple regex to match a time string in the format HH:MM:SS.
-      expect.stringMatching(/^\d{2}:\d{2}:\d{2}/)
-    )
-  })
+      expect(core.setFailed).toHaveBeenCalledWith('This action must be triggered by a pull_request event')
+    })
 
-  it('Sets a failed status', async () => {
-    // Clear the getInput mock and return an invalid value.
-    core.getInput.mockClear().mockReturnValueOnce('this is not a number')
+    it('should detect no conflicts when PRs modify different files', async () => {
+      const mockOctokit = setupMockOctokit()
+      github.context.payload = { pull_request: { number: 1 } }
+      github.context.repo = { owner: 'test-owner', repo: 'test-repo' }
+      github.getOctokit.mockReturnValue(mockOctokit)
+      core.getInput.mockReturnValue('fake-token')
+      core.getBooleanInput.mockReturnValue(false)
 
-    // Clear the wait mock and return a rejected promise.
-    wait.mockClear().mockRejectedValueOnce(new Error('milliseconds is not a number'))
+      // Mock current PR files
+      mockOctokit.rest.pulls.listFiles.mockResolvedValueOnce({
+        data: [
+          { filename: 'file1.ts', status: 'modified' },
+          { filename: 'file2.ts', status: 'added' }
+        ]
+      })
 
-    await run()
+      // Mock other PR list
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [
+          { number: 1, draft: false, title: 'Current PR' },
+          { number: 2, draft: false, title: 'Other PR' }
+        ]
+      })
 
-    // Verify that the action was marked as failed.
-    expect(core.setFailed).toHaveBeenNthCalledWith(1, 'milliseconds is not a number')
+      // Mock other PR files (different files)
+      mockOctokit.rest.pulls.listFiles.mockResolvedValueOnce({
+        data: [
+          { filename: 'file3.ts', status: 'modified' },
+          { filename: 'file4.ts', status: 'added' }
+        ]
+      })
+
+      await run()
+
+      expect(core.setOutput).toHaveBeenCalledWith('has-conflicts', 'false')
+      expect(core.setOutput).toHaveBeenCalledWith('conflict-count', 0)
+      expect(core.info).toHaveBeenCalledWith('✅ No potential conflicts detected with other open PRs')
+    })
+
+    it('should warn about potential conflicts when PRs modify the same files', async () => {
+      const mockOctokit = setupMockOctokit()
+      github.context.payload = { pull_request: { number: 1 } }
+      github.context.repo = { owner: 'test-owner', repo: 'test-repo' }
+      github.getOctokit.mockReturnValue(mockOctokit)
+      core.getInput.mockReturnValue('fake-token')
+      core.getBooleanInput.mockReturnValue(false)
+
+      // Mock current PR files
+      mockOctokit.rest.pulls.listFiles.mockResolvedValueOnce({
+        data: [
+          { filename: 'shared.ts', status: 'modified' },
+          { filename: 'file2.ts', status: 'added' }
+        ]
+      })
+
+      // Mock other PR list
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [
+          { number: 1, draft: false, title: 'Current PR' },
+          { number: 2, draft: false, title: 'Conflicting PR' }
+        ]
+      })
+
+      // Mock other PR files (same file modified)
+      mockOctokit.rest.pulls.listFiles.mockResolvedValueOnce({
+        data: [
+          { filename: 'shared.ts', status: 'modified' },
+          { filename: 'file4.ts', status: 'added' }
+        ]
+      })
+
+      await run()
+
+      expect(core.setOutput).toHaveBeenCalledWith('has-conflicts', 'true')
+      expect(core.setOutput).toHaveBeenCalledWith('conflict-count', 1)
+      expect(core.warning).toHaveBeenCalledWith('⚠️  PR #2 may have conflicts: 1 overlapping files')
+      expect(core.summary.addRaw).toHaveBeenCalled()
+    })
+
+    it('should skip draft PRs when include-drafts is false', async () => {
+      const mockOctokit = setupMockOctokit()
+      github.context.payload = { pull_request: { number: 1 } }
+      github.context.repo = { owner: 'test-owner', repo: 'test-repo' }
+      github.getOctokit.mockReturnValue(mockOctokit)
+      core.getInput.mockReturnValue('fake-token')
+      core.getBooleanInput.mockReturnValue(false)
+
+      // Mock current PR files
+      mockOctokit.rest.pulls.listFiles.mockResolvedValueOnce({
+        data: [{ filename: 'shared.ts', status: 'modified' }]
+      })
+
+      // Mock other PR list with a draft
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [
+          { number: 1, draft: false, title: 'Current PR' },
+          { number: 2, draft: true, title: 'Draft PR' }
+        ]
+      })
+
+      await run()
+
+      expect(mockOctokit.rest.pulls.listFiles).toHaveBeenCalledTimes(1)
+      expect(core.setOutput).toHaveBeenCalledWith('has-conflicts', 'false')
+    })
+
+    it('should check draft PRs when include-drafts is true', async () => {
+      const mockOctokit = setupMockOctokit()
+      github.context.payload = { pull_request: { number: 1 } }
+      github.context.repo = { owner: 'test-owner', repo: 'test-repo' }
+      github.getOctokit.mockReturnValue(mockOctokit)
+      core.getInput.mockReturnValue('fake-token')
+      core.getBooleanInput.mockImplementation((name) => name === 'include-drafts')
+
+      // Mock current PR files
+      mockOctokit.rest.pulls.listFiles.mockResolvedValueOnce({
+        data: [{ filename: 'shared.ts', status: 'modified' }]
+      })
+
+      // Mock other PR list with a draft
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [
+          { number: 1, draft: false, title: 'Current PR' },
+          { number: 2, draft: true, title: 'Draft PR' }
+        ]
+      })
+
+      // Mock draft PR files (same file)
+      mockOctokit.rest.pulls.listFiles.mockResolvedValueOnce({
+        data: [{ filename: 'shared.ts', status: 'modified' }]
+      })
+
+      await run()
+
+      expect(mockOctokit.rest.pulls.listFiles).toHaveBeenCalledTimes(2)
+      expect(core.setOutput).toHaveBeenCalledWith('has-conflicts', 'true')
+    })
+
+    it('should post comments when post-comments is true', async () => {
+      const mockOctokit = setupMockOctokit()
+      github.context.payload = { pull_request: { number: 1 } }
+      github.context.repo = { owner: 'test-owner', repo: 'test-repo' }
+      github.getOctokit.mockReturnValue(mockOctokit)
+      core.getInput.mockReturnValue('fake-token')
+      core.getBooleanInput.mockImplementation((name) => name === 'post-comments')
+
+      // Mock current PR files
+      mockOctokit.rest.pulls.listFiles.mockResolvedValueOnce({
+        data: [{ filename: 'shared.ts', status: 'modified' }]
+      })
+
+      // Mock other PR list
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [
+          { number: 1, draft: false, title: 'Current PR' },
+          { number: 2, draft: false, title: 'Conflicting PR' }
+        ]
+      })
+
+      // Mock other PR files
+      mockOctokit.rest.pulls.listFiles.mockResolvedValueOnce({
+        data: [{ filename: 'shared.ts', status: 'modified' }]
+      })
+
+      mockOctokit.rest.issues.createComment.mockResolvedValue({ data: {} })
+
+      await run()
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'test-owner',
+        repo: 'test-repo',
+        issue_number: 1,
+        body: expect.stringContaining('Potential Merge Conflicts Detected')
+      })
+    })
+
+    it('should handle multiple conflicting PRs', async () => {
+      const mockOctokit = setupMockOctokit()
+      github.context.payload = { pull_request: { number: 1 } }
+      github.context.repo = { owner: 'test-owner', repo: 'test-repo' }
+      github.getOctokit.mockReturnValue(mockOctokit)
+      core.getInput.mockReturnValue('fake-token')
+      core.getBooleanInput.mockReturnValue(false)
+
+      // Mock current PR files
+      mockOctokit.rest.pulls.listFiles.mockResolvedValueOnce({
+        data: [
+          { filename: 'file1.ts', status: 'modified' },
+          { filename: 'file2.ts', status: 'modified' }
+        ]
+      })
+
+      // Mock other PR list
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [
+          { number: 1, draft: false, title: 'Current PR' },
+          { number: 2, draft: false, title: 'Conflicting PR 1' },
+          { number: 3, draft: false, title: 'Conflicting PR 2' }
+        ]
+      })
+
+      // Mock PR 2 files (conflicts with file1.ts)
+      mockOctokit.rest.pulls.listFiles.mockResolvedValueOnce({
+        data: [{ filename: 'file1.ts', status: 'modified' }]
+      })
+
+      // Mock PR 3 files (conflicts with file2.ts)
+      mockOctokit.rest.pulls.listFiles.mockResolvedValueOnce({
+        data: [{ filename: 'file2.ts', status: 'modified' }]
+      })
+
+      await run()
+
+      expect(core.setOutput).toHaveBeenCalledWith('has-conflicts', 'true')
+      expect(core.setOutput).toHaveBeenCalledWith('conflict-count', 2)
+      expect(core.warning).toHaveBeenCalledTimes(2)
+    })
+
+    it('should handle pagination of PR files', async () => {
+      const mockOctokit = setupMockOctokit()
+      github.context.payload = { pull_request: { number: 1 } }
+      github.context.repo = { owner: 'test-owner', repo: 'test-repo' }
+      github.getOctokit.mockReturnValue(mockOctokit)
+      core.getInput.mockReturnValue('fake-token')
+      core.getBooleanInput.mockReturnValue(false)
+
+      // Mock current PR files with pagination (100 files per page)
+      const page1Files = Array.from({ length: 100 }, (_, i) => ({
+        filename: `file${i}.ts`,
+        status: 'modified'
+      }))
+      const page2Files = [{ filename: 'file100.ts', status: 'modified' }]
+
+      mockOctokit.rest.pulls.listFiles
+        .mockResolvedValueOnce({ data: page1Files })
+        .mockResolvedValueOnce({ data: page2Files })
+
+      // Mock other PR list (no other PRs to simplify)
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [{ number: 1, draft: false, title: 'Current PR' }]
+      })
+
+      await run()
+
+      expect(mockOctokit.rest.pulls.listFiles).toHaveBeenCalledTimes(2)
+      expect(core.info).toHaveBeenCalledWith('Current PR #1 modifies 101 files')
+    })
+
+    it('should handle API errors gracefully', async () => {
+      const mockOctokit = setupMockOctokit()
+      github.context.payload = { pull_request: { number: 1 } }
+      github.context.repo = { owner: 'test-owner', repo: 'test-repo' }
+      github.getOctokit.mockReturnValue(mockOctokit)
+      core.getInput.mockReturnValue('fake-token')
+      core.getBooleanInput.mockReturnValue(false)
+
+      // Mock API error
+      mockOctokit.rest.pulls.listFiles.mockRejectedValue(new Error('API rate limit exceeded'))
+
+      await run()
+
+      expect(core.setFailed).toHaveBeenCalledWith('API rate limit exceeded')
+    })
   })
 })
+
+function setupMockOctokit() {
+  return {
+    rest: {
+      pulls: {
+        list: jest.fn() as any,
+        listFiles: jest.fn() as any
+      },
+      issues: {
+        createComment: jest.fn() as any
+      }
+    }
+  }
+}
