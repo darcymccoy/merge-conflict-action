@@ -66,7 +66,7 @@ describe('Merge Conflict Detection Action', () => {
 
       expect(core.setOutput).toHaveBeenCalledWith('has-conflicts', 'false')
       expect(core.setOutput).toHaveBeenCalledWith('conflict-count', 0)
-      expect(core.info).toHaveBeenCalledWith('✅ No potential conflicts detected with other open PRs')
+      expect(core.info).toHaveBeenCalledWith('No potential conflicts detected with other open PRs')
     })
 
     it('should warn about potential conflicts when PRs modify the same files', async () => {
@@ -105,7 +105,7 @@ describe('Merge Conflict Detection Action', () => {
 
       expect(core.setOutput).toHaveBeenCalledWith('has-conflicts', 'true')
       expect(core.setOutput).toHaveBeenCalledWith('conflict-count', 1)
-      expect(core.warning).toHaveBeenCalledWith('⚠️  PR #2 may have conflicts: 1 overlapping files')
+      expect(core.warning).toHaveBeenCalledWith('PR #2 may have conflicts: 1 overlapping files')
       expect(core.summary.addRaw).toHaveBeenCalled()
     })
 

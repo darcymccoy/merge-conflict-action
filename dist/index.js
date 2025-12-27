@@ -32247,30 +32247,26 @@ function requireGithub () {
 
 var githubExports = requireGithub();
 
-/**
- * The main function for the action.
- *
- * @returns Resolves when the action is complete.
- */
 async function run() {
     try {
-        const includeDrafts = coreExports.getBooleanInput('include-drafts') || false;
-        const postComments = coreExports.getBooleanInput('post-comments') || false;
+        const includeDrafts = coreExports.getBooleanInput('include-drafts', { required: false });
+        const postComments = coreExports.getBooleanInput('post-comments', { required: false });
         coreExports.debug(`Include draft PRs: ${includeDrafts}`);
         const token = coreExports.getInput('github_token', { required: true });
         const octokit = githubExports.getOctokit(token);
         const { owner, repo } = githubExports.context.repo;
+        const repoInfo = { octokit, owner, repo };
         const currentPR = githubExports.context.payload.pull_request;
         if (!currentPR) {
             coreExports.setFailed('This action must be triggered by a pull_request event');
             return;
         }
         coreExports.info(`Checking PR #${currentPR.number} for potential conflicts...`);
-        const currentPRChangedFiles = await getPRFiles(octokit, owner, repo, currentPR.number);
+        const currentPRChangedFiles = await getPRFiles(repoInfo, currentPR.number);
         coreExports.info(`Current PR #${currentPR.number} modifies ${currentPRChangedFiles.length} files`);
         const { data: prs } = await octokit.rest.pulls.list({
-            owner,
-            repo,
+            owner: repoInfo.owner,
+            repo: repoInfo.repo,
             state: 'open',
             per_page: 100
         });
@@ -32282,10 +32278,10 @@ async function run() {
             if (pr.draft && !includeDrafts) {
                 continue;
             }
-            const otherPRChangedFiles = await getPRFiles(octokit, owner, repo, pr.number);
+            const otherPRChangedFiles = await getPRFiles(repoInfo, pr.number);
             const conflictingFiles = findConflictingFiles(currentPRChangedFiles, otherPRChangedFiles);
             if (conflictingFiles.length > 0) {
-                coreExports.warning(`⚠️  PR #${pr.number} may have conflicts: ${conflictingFiles.length} overlapping files`);
+                coreExports.warning(`PR #${pr.number} may have conflicts: ${conflictingFiles.length} overlapping files`);
                 conflictWarnings.push({
                     prNumber: pr.number,
                     prTitle: pr.title,
@@ -32300,14 +32296,26 @@ async function run() {
             const summary = generateSummary(conflictWarnings);
             coreExports.summary.addRaw(summary).write();
             if (postComments) {
-                await postConflictComment(octokit, owner, repo, currentPR.number, conflictWarnings);
+                try {
+                    await postConflictComment(repoInfo, currentPR.number, conflictWarnings);
+                }
+                catch (error) {
+                    if (error instanceof Error) {
+                        if (error.message.includes('Resource not accessible by integration')) {
+                            coreExports.warning('Insufficient permissions to post comment. Add "pull-requests: write" permission.');
+                        }
+                        else {
+                            coreExports.warning(`Failed to post comment: ${error.message}`);
+                        }
+                    }
+                }
             }
-            coreExports.info(`✅ Found ${conflictWarnings.length} PRs with potential conflicts`);
+            coreExports.info(`Found ${conflictWarnings.length} PRs with potential conflicts`);
         }
         else {
             coreExports.setOutput('has-conflicts', 'false');
             coreExports.setOutput('conflict-count', 0);
-            coreExports.info('✅ No potential conflicts detected with other open PRs');
+            coreExports.info('No potential conflicts detected with other open PRs');
         }
     }
     catch (error) {
@@ -32315,17 +32323,14 @@ async function run() {
             coreExports.setFailed(error.message);
     }
 }
-/**
- * Get all files changed in a PR
- */
-async function getPRFiles(octokit, owner, repo, prNumber) {
+async function getPRFiles(repoInfo, prNumber) {
     const files = [];
     let page = 1;
     const perPage = 100;
     while (true) {
-        const { data } = await octokit.rest.pulls.listFiles({
-            owner,
-            repo,
+        const { data } = await repoInfo.octokit.rest.pulls.listFiles({
+            owner: repoInfo.owner,
+            repo: repoInfo.repo,
             pull_number: prNumber,
             per_page: perPage,
             page
@@ -32341,19 +32346,13 @@ async function getPRFiles(octokit, owner, repo, prNumber) {
     }
     return files;
 }
-/**
- * Find files that are modified in both PRs
- */
 function findConflictingFiles(currentPRFiles, otherPRFiles) {
     const currentModifiedFiles = new Set(currentPRFiles.filter((f) => f.status === 'modified' || f.status === 'removed').map((f) => f.filename));
     const otherModifiedFiles = otherPRFiles.filter((f) => (f.status === 'modified' || f.status === 'removed') && currentModifiedFiles.has(f.filename));
     return otherModifiedFiles.map((f) => f.filename);
 }
-/**
- * Generate markdown summary of conflicts
- */
 function generateSummary(warnings) {
-    let summary = '## ⚠️ Potential Merge Conflicts Detected\n\n';
+    let summary = '## Potential Merge Conflicts Detected\n\n';
     summary += 'The following PRs modify the same files and may have conflicts when this PR is merged:\n\n';
     for (const warning of warnings) {
         summary += `### PR #${warning.prNumber}: ${warning.prTitle}\n`;
@@ -32370,14 +32369,11 @@ function generateSummary(warnings) {
         '> **Note:** This is a heuristic check based on file overlap. Actual merge conflicts may or may not occur.\n';
     return summary;
 }
-/**
- * Post a comment on the PR with conflict warnings
- */
-async function postConflictComment(octokit, owner, repo, prNumber, warnings) {
+async function postConflictComment(repoInfo, prNumber, warnings) {
     const summary = generateSummary(warnings);
-    await octokit.rest.issues.createComment({
-        owner,
-        repo,
+    await repoInfo.octokit.rest.issues.createComment({
+        owner: repoInfo.owner,
+        repo: repoInfo.repo,
         issue_number: prNumber,
         body: summary
     });

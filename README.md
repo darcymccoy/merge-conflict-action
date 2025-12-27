@@ -1,6 +1,7 @@
 # Merge Conflict GitHub Action
 
-A GitHub action that can detect and warn if merging a pull request will create merge conflicts in another PR.
+A GitHub action that can detect and warn if merging a pull request will create merge conflicts in another PR. Currently
+this uses a heuristic check based on file overlap.
 
 ## Usage
 
