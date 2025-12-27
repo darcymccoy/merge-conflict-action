@@ -133,9 +133,6 @@ async function getPRFiles(
   return files
 }
 
-/**
- * Find files that are modified in both PRs
- */
 function findConflictingFiles(currentPRFiles: FileChange[], otherPRFiles: FileChange[]): string[] {
   const currentModifiedFiles = new Set(
     currentPRFiles.filter((f) => f.status === 'modified' || f.status === 'removed').map((f) => f.filename)
@@ -148,9 +145,6 @@ function findConflictingFiles(currentPRFiles: FileChange[], otherPRFiles: FileCh
   return otherModifiedFiles.map((f) => f.filename)
 }
 
-/**
- * Generate markdown summary of conflicts
- */
 function generateSummary(warnings: ConflictWarning[]): string {
   let summary = '## ⚠️ Potential Merge Conflicts Detected\n\n'
   summary += 'The following PRs modify the same files and may have conflicts when this PR is merged:\n\n'
@@ -176,9 +170,6 @@ function generateSummary(warnings: ConflictWarning[]): string {
   return summary
 }
 
-/**
- * Post a comment on the PR with conflict warnings
- */
 async function postConflictComment(
   octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
