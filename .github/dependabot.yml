@@ -15,6 +15,17 @@ updates:
     schedule:
       interval: weekly
     groups:
+      eslint:
+        patterns:
+          - eslint
+          - '@eslint/*'
+          - '@typescript-eslint/*'
+          - eslint-config-*
+          - globals
+        update-types:
+          - major
+          - minor
+          - patch
       npm-development:
         dependency-type: development
         update-types:
